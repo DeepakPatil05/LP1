@@ -1,123 +1,104 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
-#include <vector>
-#include <unordered_map>
-#include <string>
 #include <algorithm>
+
 using namespace std;
 
-string trim(const string &s) {
-    int a = s.find_first_not_of(" \t\r\n");
-    if (a == -1) return "";
-    int b = s.find_last_not_of(" \t\r\n");
-    return s.substr(a, b - a + 1);
+vector<string> load(const string& fname){
+  vector<string> result;
+  ifstream file(fname);
+
+  string line;
+  while(getline(file,line)){
+    if(!line.empty()) result.push_back(line);
+  }
+  return result;
 }
 
-void replaceAll(string &line, const string &from, const string &to) {
-    int pos = 0;
-    while ((pos = line.find(from, pos)) != string::npos) {
-        line.replace(pos, from.size(), to);
-        pos += to.size();
-    }
+vector<string> tokenize(const string& line){
+  vector<string> tokens;
+  stringstream ss(line);
+  string token;
+  while(ss >> token) tokens.push_back(token);
+  return tokens;
 }
 
-vector<string> splitArgs(const string &s) {
-    string t = trim(s);
-    vector<string> args;
-    if (t.empty()) return args;
-
-    bool hasComma = (t.find(',') != string::npos);
-    string token;
-    stringstream ss(t);
-
-    if (hasComma) {
-        while (getline(ss, token, ',')) {
-            token = trim(token);
-            if (!token.empty()) args.push_back(token);
-        }
-    } else {
-        while (ss >> token) args.push_back(token);
-    }
-    return args;
+void getMNTEntry(vector<string>& mnt,const string& macroName,int& pp,int& kp,int& kpdtptr,int& mdtptr){
+  for(string entry:mnt){
+    stringstream ss(entry);
+    string name;
+    ss >> name >> pp >> kp >> kpdtptr >> mdtptr;
+    if(name==macroName) return;
+  }
 }
 
-int main() {
-    ifstream mntFile("mnt.txt");
-    if (!mntFile) { cerr << "Cannot open mnt.txt\n"; return 1; }
+void expandMacro(const string& macroName,vector<string>& call,vector<string>& mnt,vector<string> mdt,const vector<string> &kpdt,ofstream& outfile){
+  int pp,kp,mdtPtr,kpdtPtr;
+  getMNTEntry(mnt,macroName,pp,kp,kpdtPtr,mdtPtr);
 
-    unordered_map<string, int> MNT;
-    string macroName;
-    int mdtIndex;
-    while (mntFile >> macroName >> mdtIndex) MNT[macroName] = mdtIndex;
-    mntFile.close();
+  vector<string> params(pp+kp);
 
-    ifstream mdtFile("mdt.txt");
-    if (!mdtFile) { cerr << "Cannot open mdt.txt\n"; return 1; }
+  for(int i=0;i<pp && i+1<call.size();i++){
+    params[i] = call[i+1];
+  };
 
-    vector<string> MDT;
-    string line;
-    getline(mdtFile, line); // handle stray newline
-    while (getline(mdtFile, line)) MDT.push_back(line);
-    mdtFile.close();
+  for(int i=0;i<kp;i++){
+    stringstream ss(kpdt[kpdtPtr+i-1]);
+    string key,value;
+    ss >> key >> value;
+    params[pp+i] = value;
+  }
 
-    ifstream inter("intermediate.txt");
-    ofstream out("expanded.txt");
-    if (!inter || !out) { cerr << "File error\n"; return 1; }
+  for(int i=pp;i<call.size()-1 && (i-pp)<kp;i++){
+    params[i] = call[i+1];
+  }
 
-    string raw;
-    while (getline(inter, raw)) {
-        string s = trim(raw);
-        if (s.empty()) { out << "\n"; continue; }
+  int i = mdtPtr-1;
+  while(i<mdt.size() && mdt[i]!="MEND"){
+    string line = mdt[i];
 
-        stringstream ss(s);
-        vector<string> tokens;
-        string tok;
-        while (ss >> tok) tokens.push_back(tok);
-
-        string label = "", macro = "";
-
-        if (!tokens.empty() && tokens[0].back() == ':') {
-            label = tokens[0];
-            if (tokens.size() > 1) macro = tokens[1];
-        } else if (tokens.size() > 1 && MNT.find(tokens[1]) != MNT.end()) {
-            label = tokens[0];
-            macro = tokens[1];
-        } else if (!tokens.empty()) {
-            macro = tokens[0];
-        }
-
-        if (macro.empty() || MNT.find(macro) == MNT.end()) {
-            out << raw << "\n";
-            continue;
-        }
-
-        // Extract arguments
-        int pos = raw.find(macro);
-        string argStr = (pos != -1) ? trim(raw.substr(pos + macro.size())) : "";
-        vector<string> args = splitArgs(argStr);
-
-        int start = MNT[macro];
-        bool firstLine = true;
-        for (int i = start; i < MDT.size(); i++) {
-            string body = MDT[i];
-            if (trim(body) == "MEND") break;
-
-            for (int j = 0; j < args.size(); j++) {
-                string ph = "#" + to_string(j);
-                replaceAll(body, ph, args[j]);
-            }
-
-            body = trim(body);
-            if (firstLine && !label.empty()) {
-                out << label << " " << body << "\n";
-                firstLine = false;
-            } else {
-                out << body << "\n";
-            }
-        }
+    for(int p=0;p<params.size();p++){
+      string placeholder = "(P,"+to_string(p)+")";
+      if(line.find(placeholder) != string::npos){
+        line.replace(line.find(placeholder),placeholder.length(),params[p]);
+      }
     }
 
-    cout << "Pass 2 complete → expanded.txt\n";
-    return 0;
+    outfile << line << endl;
+    i++;
+  }
+}
+
+void performPass2(){
+  vector<string> mnt = load("mnt1.txt");
+  vector<string> mdt = load("mdt1.txt");
+  vector<string> kpdt = load("kpdt1.txt");
+  vector<string> input = load("OutputFile.txt");
+
+  ofstream out("Expanded.txt");
+
+  for(string line:input){
+    vector<string> tokens = tokenize(line);
+    if(tokens.empty()) continue;
+
+    string word = tokens[0];
+    bool isMacro = false;
+
+    for(string str:mnt){
+      if(str.find(word) != string::npos){
+        isMacro = true;
+        expandMacro(word,tokens,mnt,mdt,kpdt,out);
+        break;
+      }
+    }
+     if(!isMacro){
+      out << line << endl;
+     } 
+  }
+}
+
+int main(){
+  performPass2();
+  cout<<"Pass 2 Completed";
 }

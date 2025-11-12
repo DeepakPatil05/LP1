@@ -1,184 +1,157 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
 #include <vector>
-#include <unordered_map>
 #include <string>
-#include <cctype>
 
 using namespace std;
 
-struct MNTEntry {
-    string macroName;
-    int mdtIndex; // 0-based index into MDT where the macro body starts
-};
+vector<vector<string>> tokenizer(const string& fname){
+  ifstream tokenfile(fname);
+  vector<vector<string>> result;
 
-vector<MNTEntry> MNT;
-vector<string> MDT;
-// store ALA list per macro (ordered list of formal parameter names, without &)
-vector<vector<string>> ALA_per_macro;
+  string line;
+  while(getline(tokenfile,line)){
+    replace(line.begin(),line.end(),',',' ');
 
-string trim(const string &str) {
-    int first = str.find_first_not_of(" \t\r\n");
-    if (first == string::npos) return "";
-    int last = str.find_last_not_of(" \t\r\n");
-    return str.substr(first, (last - first + 1));
-}
-
-vector<string> split(const string &line, char delimiter = ',') {
     vector<string> tokens;
     stringstream ss(line);
     string token;
-    while (getline(ss, token, delimiter)) {
-        tokens.push_back(trim(token));
-    }
-    return tokens;
+    while(ss >> token) tokens.push_back(token);
+    result.push_back(tokens);
+  }
+
+  return result;
 }
 
-// Replace occurrences of "&param" in a line with placeholder "#idx"
-string replaceAmpParam(const string &line, const string &param, int idx) {
-    string out;
-    string pattern = "&" + param;
-    string placeholder = "#" + to_string(idx);
+vector<string> mnt;
+vector<string> mdt;
+vector<string> kpdt;
+int kpdtPtr = 1;
+int mdtPtr = 1;
 
-    size_t pos = 0;
-    while (pos < line.size()) {
-        size_t found = line.find(pattern, pos);
-        if (found == string::npos) {
-            out.append(line.substr(pos));
-            break;
-        }
-        // append up to found, then placeholder, then continue
-        out.append(line.substr(pos, found - pos));
-        out.append(placeholder);
-        pos = found + pattern.length();
+void separateMacro(const string& filename) {
+  ifstream inputfile(filename);
+  ofstream macro("MacroFile.txt");
+  ofstream out("OutputFile.txt");
+
+  bool inside = false;
+  string line;
+  while(getline(inputfile,line)){
+    if(line=="MACRO"){
+      inside = true;
+      macro << line << endl;
     }
-    return out;
+    else if(line=="MEND"){
+      inside = false;
+      macro << line << endl;
+    }
+    else if(inside){
+      macro << line << endl;
+    }
+    else{
+      out << line << endl;
+    }
+  }
+
+  inputfile.close();
+  out.close();
+  macro.close();
 }
 
-// parse macro header line: "MACNAME &A, &B"
-// returns pair(macroName, ordered vector of formal parameter names (no &))
-pair<string, vector<string>> parseMacroHeader(const string &headerLine) {
-    stringstream ss(headerLine);
-    string macroName;
-    ss >> macroName;
-    string rest;
-    getline(ss, rest);
-    rest = trim(rest);
-    vector<string> params;
-    if (!rest.empty()) {
-        vector<string> parts = split(rest, ',');
-        for (string p : parts) {
-            p = trim(p);
-            // expect leading '&' — remove it
-            if (!p.empty() && p.front() == '&') p = p.substr(1);
-            if (!p.empty()) params.push_back(p);
-        }
+void processMacro(vector<vector<string>>& macro){
+  vector<string> pnt;
+  //mnt
+  string mntEntry = macro[1][0] + " ";
+  int ppCount = 0;
+  int kpCount = 0;
+
+  for(size_t i = 1;i<macro[1].size();i++){
+    if(macro[1][i].find('=') != string::npos){
+      kpCount++;
     }
-    return {macroName, params};
+    else ppCount++;
+  }
+
+  mntEntry += (to_string(ppCount) + " " + to_string(kpCount) + " " + to_string(kpdtPtr) + " " + to_string(mdtPtr));
+  mnt.push_back(mntEntry);
+
+  //kpdt
+  for(size_t i = 1;i<macro[1].size();i++){
+    if(macro[1][i].find('=') != string::npos){
+      size_t pos = macro[1][i].find('=');
+      string name = macro[1][i].substr(0,pos);
+      string val = macro[1][i].substr(pos+1);
+
+      if(val.empty()) kpdt.push_back(name + " -1");
+      else kpdt.push_back(name + " " + val);
+
+      kpdtPtr++;
+    }
+  }
+
+  //pnt
+  for(size_t i=1;i<macro[1].size();i++){
+    size_t pos = macro[1][i].find('=');
+    if(pos!=string::npos){
+      pnt.push_back(macro[1][i].substr(0,pos));
+    }
+    else pnt.push_back(macro[1][i]);
+  }
+
+  //mdt
+  for(size_t i = 2;i<macro.size();i++){
+    string mdtEntry = "";
+
+    for(string word:macro[i]){
+      if(word[0]=='&'){
+        mdtEntry += "(P," + to_string(find(pnt.begin(),pnt.end(),word) - pnt.begin()) + ") ";
+      }
+      else mdtEntry += word + " ";
+    }
+    mdt.push_back(mdtEntry);
+    mdtPtr++;
+  }
 }
 
-void writeTables() {
-    ofstream mntFile("mnt.txt");
-    for (auto &e : MNT) {
-        mntFile << e.macroName << " " << e.mdtIndex << endl;
-    }
-    mntFile.close();
-
-    ofstream mdtFile("mdt.txt");
-    for (auto &line : MDT) {
-        mdtFile << line << endl;
-    }
-    mdtFile.close();
-
-    ofstream alaFile("ala.txt");
-    // Write ALA per macro in a readable way:
-    for (int m = 0; m < (int)MNT.size(); ++m) {
-        alaFile << MNT[m].macroName << ":" << endl;
-        for (int i = 0; i < (int)ALA_per_macro[m].size(); ++i) {
-            alaFile << i << " " << ALA_per_macro[m][i] << endl;
-        }
-        alaFile << endl;
-    }
-    alaFile.close();
+void save(vector<string>& data,const string& fname,const string& title){
+  ofstream file(fname);
+  cout<<"--- "<<title<<" ---"<<endl;
+  for(string line:data){
+    file << line << endl;
+    cout << line << endl;
+  }
+  cout<<endl;
+  file.close();
 }
 
-void pass1(const string &inputFile = "source.asm") {
-    ifstream input(inputFile);
-    if (!input) {
-        cerr << "Error: could not open " << inputFile << endl;
-        return;
+void processPassOne(){
+  separateMacro("tc1.txt");
+  vector<vector<string>> instructions = tokenizer("MacroFile.txt");
+
+  for(size_t i=0;i<instructions.size();i++){
+    if(instructions[i].size()>0 && instructions[i][0]=="MACRO"){
+      vector<vector<string>> macroBlock;
+
+      while(i<instructions.size()){
+        if(instructions[i].size()>0 && instructions[i][0]=="MEND"){
+          macroBlock.push_back(instructions[i]);
+          break;
+        }
+        else macroBlock.push_back(instructions[i]);
+        i++;
+      }
+      processMacro(macroBlock);
     }
+  }
 
-    ofstream intermediate("intermediate.txt");
-    if (!intermediate) {
-        cerr << "Error: could not create intermediate.txt" << endl;
-        return;
-    }
-
-    string line;
-    bool inMacroDef = false;
-
-    while (getline(input, line)) {
-        string rawLine = line;
-        string tline = trim(line);
-
-        if (tline.empty()) {
-            // preserve blank lines in intermediate (only outside macro defs)
-            if (!inMacroDef) intermediate << rawLine << endl;
-            continue;
-        }
-
-        if (tline == "MACRO") {
-            // start macro definition; next line must be header
-            if (!getline(input, line)) {
-                cerr << "Unexpected EOF after MACRO" << endl;
-                break;
-            }
-            string header = trim(line);
-            auto parsed = parseMacroHeader(header);
-            string macroName = parsed.first;
-            vector<string> formals = parsed.second;
-
-            // record MNT entry pointing to the index where body will start
-            int mdtIndex = (int)MDT.size();
-            MNT.push_back({macroName, mdtIndex});
-            // store ALA for this macro
-            ALA_per_macro.push_back(formals);
-
-            inMacroDef = true;
-            continue; // do not write header into MDT
-        }
-
-        if (tline == "MEND") {
-            // add MEND to MDT and finish macro
-            MDT.push_back("MEND");
-            inMacroDef = false;
-            continue;
-        }
-
-        if (inMacroDef) {
-            // process body line: replace only "&param" with positional placeholders
-            string processed = line;
-            const vector<string> &formals = ALA_per_macro.back();
-            for (int i = 0; i < (int)formals.size(); ++i) {
-                processed = replaceAmpParam(processed, formals[i], i);
-            }
-            MDT.push_back(processed);
-        } else {
-            // outside macro: copy to intermediate (macro calls remain as-is)
-            intermediate << rawLine << endl;
-        }
-    }
-
-    input.close();
-    intermediate.close();
-
-    writeTables();
-    cout << "Pass 1 complete. Files written: mnt.txt, mdt.txt, ala.txt, intermediate.txt" << endl;
+  save(mnt,"mnt1.txt","MNT");
+  save(kpdt,"kpdt1.txt","KPDT");
+  save(mdt,"mdt1.txt","MDT");
+  cout<<"# # # FINISH # # #"<<endl;
 }
 
-int main() {
-    pass1("input.txt"); // change to your source filename if needed
-    return 0;
-}
+int main() {processPassOne();}
+
+
